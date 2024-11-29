@@ -4,6 +4,17 @@
 
 package gardenlinux
 
+import (
+	"embed"
+)
+
+var (
+	//go:embed scripts/*
+	Templates embed.FS
+
+	ScriptPermissions = uint32(0755)
+)
+
 const (
 	// OSTypeGardenLinux is a constant for the Garden Linux extension OS type.
 	OSTypeGardenLinux = "gardenlinux"

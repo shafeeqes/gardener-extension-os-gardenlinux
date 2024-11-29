@@ -8,13 +8,17 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"path/filepath"
 
 	"github.com/gardener/gardener/extensions/pkg/controller/operatingsystemconfig"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/gardener/gardener-extension-os-gardenlinux/pkg/gardenlinux"
 	"github.com/gardener/gardener-extension-os-gardenlinux/pkg/memoryone"
 )
 
@@ -29,18 +33,18 @@ func NewActuator(mgr manager.Manager) operatingsystemconfig.Actuator {
 	}
 }
 
-func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, error) {
+func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, *extensionsv1alpha1.InPlaceUpdateConfig, error) {
 	switch purpose := osc.Spec.Purpose; purpose {
 	case extensionsv1alpha1.OperatingSystemConfigPurposeProvision:
 		userData, err := a.handleProvisionOSC(ctx, osc)
-		return []byte(userData), nil, nil, err
+		return []byte(userData), nil, nil, nil, err
 
 	case extensionsv1alpha1.OperatingSystemConfigPurposeReconcile:
-		extensionUnits, extensionFiles, err := a.handleReconcileOSC(osc)
-		return nil, extensionUnits, extensionFiles, err
+		extensionUnits, extensionFiles, inPlaceUpdateConfig, err := a.handleReconcileOSC(osc)
+		return nil, extensionUnits, extensionFiles, inPlaceUpdateConfig, err
 
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown purpose: %s", purpose)
+		return nil, nil, nil, nil, fmt.Errorf("unknown purpose: %s", purpose)
 	}
 }
 
@@ -56,7 +60,7 @@ func (a *actuator) ForceDelete(ctx context.Context, log logr.Logger, osc *extens
 	return a.Delete(ctx, log, osc)
 }
 
-func (a *actuator) Restore(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, error) {
+func (a *actuator) Restore(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, *extensionsv1alpha1.InPlaceUpdateConfig, error) {
 	return a.Reconcile(ctx, log, osc)
 }
 
@@ -119,8 +123,16 @@ Content-Type: text/x-shellscript
 	return out, nil
 }
 
-func (a *actuator) handleReconcileOSC(_ *extensionsv1alpha1.OperatingSystemConfig) ([]extensionsv1alpha1.Unit, []extensionsv1alpha1.File, error) {
+var scriptContentInPlaceUpdate []byte
 
+func init() {
+	var err error
+
+	scriptContentInPlaceUpdate, err = gardenlinux.Templates.ReadFile(filepath.Join("scripts", "inplace-update.sh"))
+	utilruntime.Must(err)
+}
+
+func (a *actuator) handleReconcileOSC(osConfig *extensionsv1alpha1.OperatingSystemConfig) ([]extensionsv1alpha1.Unit, []extensionsv1alpha1.File, *extensionsv1alpha1.InPlaceUpdateConfig, error) {
 	extensionUnits := []extensionsv1alpha1.Unit{
 		{
 			Name: "containerd.service",
@@ -135,5 +147,17 @@ LimitNOFILE=1048576`,
 		},
 	}
 
-	return extensionUnits, nil, nil
+	filePathOSUpdateScript := filepath.Join("/opt/gardener/bin", "inplace-update.sh")
+	extensionFiles := []extensionsv1alpha1.File{{
+		Path:        filePathOSUpdateScript,
+		Content:     extensionsv1alpha1.FileContent{Inline: &extensionsv1alpha1.FileContentInline{Data: string(scriptContentInPlaceUpdate)}},
+		Permissions: &gardenlinux.ScriptPermissions,
+	}}
+
+	inPlaceUpdateConfig := &extensionsv1alpha1.InPlaceUpdateConfig{
+		OSUpdateCommand:     ptr.To(filePathOSUpdateScript),
+		OSUpdateCommandArgs: []string{ptr.Deref(osConfig.Spec.OSVersion, "")},
+	}
+
+	return extensionUnits, extensionFiles, inPlaceUpdateConfig, nil
 }
