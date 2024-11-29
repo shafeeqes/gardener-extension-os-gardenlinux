@@ -32,18 +32,18 @@ func NewActuator(mgr manager.Manager) operatingsystemconfig.Actuator {
 	}
 }
 
-func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, error) {
+func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, *extensionsv1alpha1.InPlaceUpdatesStatus, error) {
 	switch purpose := osc.Spec.Purpose; purpose {
 	case extensionsv1alpha1.OperatingSystemConfigPurposeProvision:
 		userData, err := a.handleProvisionOSC(ctx, osc)
-		return []byte(userData), nil, nil, err
+		return []byte(userData), nil, nil, nil, err
 
 	case extensionsv1alpha1.OperatingSystemConfigPurposeReconcile:
-		extensionUnits, extensionFiles, err := a.handleReconcileOSC(osc)
-		return nil, extensionUnits, extensionFiles, err
+		extensionUnits, extensionFiles, inPlaceUpdates, err := a.handleReconcileOSC(osc)
+		return nil, extensionUnits, extensionFiles, inPlaceUpdates, err
 
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown purpose: %s", purpose)
+		return nil, nil, nil, nil, fmt.Errorf("unknown purpose: %s", purpose)
 	}
 }
 
@@ -59,7 +59,7 @@ func (a *actuator) ForceDelete(ctx context.Context, log logr.Logger, osc *extens
 	return a.Delete(ctx, log, osc)
 }
 
-func (a *actuator) Restore(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, error) {
+func (a *actuator) Restore(ctx context.Context, log logr.Logger, osc *extensionsv1alpha1.OperatingSystemConfig) ([]byte, []extensionsv1alpha1.Unit, []extensionsv1alpha1.File, *extensionsv1alpha1.InPlaceUpdatesStatus, error) {
 	return a.Reconcile(ctx, log, osc)
 }
 
@@ -136,6 +136,7 @@ Content-Type: text/x-shellscript
 }
 
 var (
+	scriptContentInPlaceUpdate          []byte
 	scriptContentGFunctions             []byte
 	scriptContentKubeletCGroupDriver    []byte
 	scriptContentContainerdCGroupDriver []byte
@@ -144,6 +145,8 @@ var (
 func init() {
 	var err error
 
+	scriptContentInPlaceUpdate, err = gardenlinux.Templates.ReadFile(filepath.Join("scripts", "inplace-update.sh"))
+	utilruntime.Must(err)
 	scriptContentGFunctions, err = gardenlinux.Templates.ReadFile(filepath.Join("scripts", "g_functions.sh"))
 	utilruntime.Must(err)
 	scriptContentKubeletCGroupDriver, err = gardenlinux.Templates.ReadFile(filepath.Join("scripts", "kubelet_cgroup_driver.sh"))
@@ -152,11 +155,28 @@ func init() {
 	utilruntime.Must(err)
 }
 
-func (a *actuator) handleReconcileOSC(_ *extensionsv1alpha1.OperatingSystemConfig) ([]extensionsv1alpha1.Unit, []extensionsv1alpha1.File, error) {
+func (a *actuator) handleReconcileOSC(osConfig *extensionsv1alpha1.OperatingSystemConfig) ([]extensionsv1alpha1.Unit, []extensionsv1alpha1.File, *extensionsv1alpha1.InPlaceUpdatesStatus, error) {
 	var (
 		extensionUnits []extensionsv1alpha1.Unit
 		extensionFiles []extensionsv1alpha1.File
+		inPlaceUpdates *extensionsv1alpha1.InPlaceUpdatesStatus
 	)
+
+	if osConfig.Spec.InPlaceUpdates != nil {
+		filePathOSUpdateScript := filepath.Join(gardenlinux.ScriptLocation, "inplace-update.sh")
+		extensionFiles = append(extensionFiles, extensionsv1alpha1.File{
+			Path:        filePathOSUpdateScript,
+			Content:     extensionsv1alpha1.FileContent{Inline: &extensionsv1alpha1.FileContentInline{Data: string(scriptContentInPlaceUpdate)}},
+			Permissions: &gardenlinux.ScriptPermissions,
+		})
+
+		inPlaceUpdates = &extensionsv1alpha1.InPlaceUpdatesStatus{
+			OSUpdate: &extensionsv1alpha1.OSUpdate{
+				Command: filePathOSUpdateScript,
+				Args:    []string{osConfig.Spec.InPlaceUpdates.OperatingSystemVersion},
+			},
+		}
+	}
 
 	filePathFunctionsHelperScript := filepath.Join(gardenlinux.ScriptLocation, "g_functions.sh")
 	extensionFiles = append(extensionFiles, extensionsv1alpha1.File{
@@ -201,5 +221,5 @@ ExecStartPre=` + filePathContainerdCGroupDriverScript + `
 		FilePaths: []string{filePathFunctionsHelperScript, filePathContainerdCGroupDriverScript},
 	})
 
-	return extensionUnits, extensionFiles, nil
+	return extensionUnits, extensionFiles, inPlaceUpdates, nil
 }
